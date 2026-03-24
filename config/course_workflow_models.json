@@ -1,0 +1,15 @@
+{
+  "api_base": "https://api.n1n.ai/v1",
+  "roles": {
+    "stage_capture_model": "gemini-3.1-flash-image-preview",
+    "draft_model": "qwen2.5-14b-instruct",
+    "rewrite_model": "claude-haiku-4-5-20251001",
+    "controller_model": "gpt-5.4"
+  },
+  "notes": {
+    "stage_capture_model": "High-frequency low-cost stage capture summarization.",
+    "draft_model": "Chinese lecture-note draft generation and term alignment.",
+    "rewrite_model": "Final rewrite for consistent style and readability.",
+    "controller_model": "Dialogue, orchestration, start-stop control, and exception routing only."
+  }
+}

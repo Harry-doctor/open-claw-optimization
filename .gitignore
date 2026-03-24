@@ -1,0 +1,29 @@
+config/n1n.local.json
+
+# runtime artifacts
+*.log
+*.jsonl
+current_*.md
+current_*.txt
+current_*.json
+capture_*.flag
+course_note_pipeline.log
+capture_watch.log
+video_exports.log
+video_note_errors.log
+ocr_debug.txt
+image_ocr.txt
+openclaw_desktop_test.png
+
+# generated outputs
+out/
+tmp/
+backups/
+
+# local state
+.openclaw/
+.clawhub/
+
+# caches
+__pycache__/
+scripts/__pycache__/
