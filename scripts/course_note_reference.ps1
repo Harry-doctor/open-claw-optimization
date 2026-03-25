@@ -39,6 +39,12 @@ function Get-CourseWorkflowReferenceGuide {
     }
   }
 
+  $lessonsText = ''
+  $lessonsPath = Join-Path $Workspace 'references\course-note-reference\05-audit-memory-and-delivery-threshold.md'
+  if ($Stage -in @('rewrite', 'audit', 'patch') -and (Test-Path $lessonsPath)) {
+    $lessonsText = (Get-Content $lessonsPath -Raw -Encoding UTF8).Trim()
+  }
+
   $meta = @()
   if ($config.reference_doc) {
     if ($config.reference_doc.title) { $meta += "- 参考样例：$($config.reference_doc.title)" }
@@ -49,6 +55,7 @@ function Get-CourseWorkflowReferenceGuide {
   if ($stageConfig.feeding_strategy) { $meta += "- 喂料策略：$($stageConfig.feeding_strategy)" }
 
   $metaBlock = if ($meta.Count -gt 0) { ($meta -join "`n") + "`n" } else { '' }
+  $lessonsBlock = if ($lessonsText) { "`n`n审计记忆与可交付阈值（属于长期保留喂料，后续相关任务默认参考）：`n$lessonsText" } else { '' }
   $snapshotBlock = if ($snapshotText) { "`n`n参考文档快照（直接对齐交付形态时使用，不要照抄内容）：`n$snapshotText" } else { '' }
-  return ($metaBlock + "`n" + $guideText + $snapshotBlock).Trim()
+  return ($metaBlock + "`n" + $guideText + $lessonsBlock + $snapshotBlock).Trim()
 }
