@@ -32,6 +32,8 @@ def run(cmd: List[str], *, cwd: Optional[Path] = None, capture: bool = False, ch
     kwargs = {
         'cwd': str(cwd) if cwd else None,
         'text': True,
+        'encoding': 'utf-8',
+        'errors': 'ignore',
     }
     if capture:
         kwargs['stdout'] = subprocess.PIPE
@@ -48,9 +50,26 @@ def run(cmd: List[str], *, cwd: Optional[Path] = None, capture: bool = False, ch
 
 def ensure_bin(name: str) -> str:
     path = shutil.which(name)
-    if not path:
-        raise RuntimeError(f"Missing required binary: {name}")
-    return path
+    if path:
+        return path
+
+    fallbacks = {
+        'tesseract': [
+            r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+            r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+        ],
+        'ffmpeg': [
+            r'C:\ffmpeg\bin\ffmpeg.exe',
+        ],
+        'curl': [
+            r'C:\Windows\System32\curl.exe',
+        ],
+    }
+    for candidate in fallbacks.get(name, []):
+        if Path(candidate).exists():
+            return candidate
+
+    raise RuntimeError(f"Missing required binary: {name}")
 
 
 def collect_files(args) -> List[Path]:
@@ -99,6 +118,32 @@ def write_text(path: Path, text: str):
     path.write_text(text, encoding='utf-8')
 
 
+def validate_runtime(args):
+    if args.frame_interval <= 0:
+        raise RuntimeError('--frame-interval must be greater than 0.')
+    if args.max_frames < 0:
+        raise RuntimeError('--max-frames must be 0 or greater.')
+
+    if not args.skip_transcript:
+        ensure_bin('ffmpeg')
+        if args.stt_backend == 'local':
+            script = Path(__file__).resolve().parent / 'whisper-transcribe.ps1'
+            if not script.exists():
+                raise RuntimeError(f'Missing local whisper script: {script}')
+            python_root = Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'Python' / 'Python311'
+            whisper_exe = python_root / 'Scripts' / 'whisper.exe'
+            if not whisper_exe.exists():
+                raise RuntimeError(f'Missing local whisper executable: {whisper_exe}')
+        else:
+            ensure_bin('curl')
+            if not os.environ.get('OPENAI_API_KEY'):
+                raise RuntimeError('Missing OPENAI_API_KEY for transcription.')
+
+    if not args.skip_ocr:
+        ensure_bin('ffmpeg')
+        ensure_bin('tesseract')
+
+
 def extract_audio(video: Path, audio_out: Path):
     ensure_bin('ffmpeg')
     audio_out.parent.mkdir(parents=True, exist_ok=True)
@@ -114,7 +159,7 @@ def extract_audio(video: Path, audio_out: Path):
     run(cmd)
 
 
-def transcribe_audio(audio_path: Path, transcript_out: Path, *, model: str, language: str = '', prompt: str = ''):
+def transcribe_audio_api(audio_path: Path, transcript_out: Path, *, model: str, language: str = '', prompt: str = ''):
     ensure_bin('curl')
     if not os.environ.get('OPENAI_API_KEY'):
         raise RuntimeError('Missing OPENAI_API_KEY for transcription.')
@@ -135,6 +180,33 @@ def transcribe_audio(audio_path: Path, transcript_out: Path, *, model: str, lang
     transcript_out.write_text(result.stdout or '', encoding='utf-8')
 
 
+def transcribe_audio_local(audio_path: Path, transcript_out: Path, *, model: str = 'medium', language: str = 'zh'):
+    script = Path(__file__).resolve().parent / 'whisper-transcribe.ps1'
+    if not script.exists():
+        raise RuntimeError(f'Missing local whisper script: {script}')
+    transcript_out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        'powershell', '-ExecutionPolicy', 'Bypass', '-File', str(script),
+        str(audio_path), str(transcript_out.parent),
+        '-Model', model,
+        '-OutputFormat', 'txt',
+    ]
+    if language:
+        cmd += ['-Language', language]
+    run(cmd)
+    generated = transcript_out.parent / f'{audio_path.stem}.txt'
+    if not generated.exists():
+        raise RuntimeError(f'Local whisper did not produce transcript: {generated}')
+    transcript_out.write_text(generated.read_text(encoding='utf-8', errors='ignore'), encoding='utf-8')
+
+
+def transcribe_audio(audio_path: Path, transcript_out: Path, *, backend: str, model: str, local_model: str, language: str = '', prompt: str = ''):
+    if backend == 'local':
+        transcribe_audio_local(audio_path, transcript_out, model=local_model, language=language or 'zh')
+        return
+    transcribe_audio_api(audio_path, transcript_out, model=model, language=language, prompt=prompt)
+
+
 def extract_frames(video: Path, frames_dir: Path, *, every_seconds: int, max_frames: int):
     ensure_bin('ffmpeg')
     frames_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +220,11 @@ def extract_frames(video: Path, frames_dir: Path, *, every_seconds: int, max_fra
     ]
     run(cmd)
     frames = sorted(frames_dir.glob('frame_*.jpg'), key=lambda p: natural_key(p.name))
+    if not frames:
+        raise RuntimeError(
+            f'No OCR frames extracted from {video.name}. '
+            f'Check --frame-interval ({every_seconds}) or source video readability.'
+        )
     if max_frames > 0:
         frames = frames[:max_frames]
         for extra in sorted(frames_dir.glob('frame_*.jpg'), key=lambda p: natural_key(p.name))[max_frames:]:
@@ -156,8 +233,8 @@ def extract_frames(video: Path, frames_dir: Path, *, every_seconds: int, max_fra
 
 
 def ocr_image(image_path: Path, *, lang: str = 'chi_sim+eng', psm: str = '6') -> str:
-    ensure_bin('tesseract')
-    cmd = ['tesseract', str(image_path), 'stdout', '-l', lang, '--psm', psm]
+    tesseract_bin = ensure_bin('tesseract')
+    cmd = [tesseract_bin, str(image_path), 'stdout', '-l', lang, '--psm', psm]
     result = run(cmd, capture=True)
     return (result.stdout or '').strip()
 
@@ -211,7 +288,9 @@ def process_video(video: Path, out_root: Path, args, index: int, total: int):
         transcribe_audio(
             audio_path,
             transcript_path,
+            backend=args.stt_backend,
             model=args.whisper_model,
+            local_model=args.local_whisper_model,
             language=args.language,
             prompt=args.transcript_prompt,
         )
@@ -263,7 +342,9 @@ def main():
     parser.add_argument('--out-dir', required=True, help='Output directory for batch artifacts.')
     parser.add_argument('--frame-interval', type=int, default=30, help='Extract one frame every N seconds for OCR (default: 30).')
     parser.add_argument('--max-frames', type=int, default=20, help='Maximum frames kept per video (default: 20; 0 means unlimited).')
-    parser.add_argument('--whisper-model', default='whisper-1', help='OpenAI transcription model (default: whisper-1).')
+    parser.add_argument('--stt-backend', choices=['api', 'local'], default=os.environ.get('VIDEO_BATCH_STT_BACKEND', 'api'), help='Speech-to-text backend: api or local (default: env VIDEO_BATCH_STT_BACKEND or api).')
+    parser.add_argument('--whisper-model', default='whisper-1', help='OpenAI transcription model when --stt-backend api (default: whisper-1).')
+    parser.add_argument('--local-whisper-model', default=os.environ.get('VIDEO_BATCH_LOCAL_WHISPER_MODEL', 'medium'), help='Local Whisper model when --stt-backend local (default: env VIDEO_BATCH_LOCAL_WHISPER_MODEL or medium).')
     parser.add_argument('--language', default='zh', help='Hint language for transcription (default: zh).')
     parser.add_argument('--transcript-prompt', default='', help='Optional prompt sent to the transcription API.')
     parser.add_argument('--ocr-lang', default='chi_sim+eng', help='Tesseract OCR language pack (default: chi_sim+eng).')
@@ -277,6 +358,8 @@ def main():
 
     if args.order == 'manifest' and not args.manifest:
         parser.error('--order manifest requires --manifest')
+
+    validate_runtime(args)
 
     out_root = Path(args.out_dir).expanduser().resolve()
     out_root.mkdir(parents=True, exist_ok=True)

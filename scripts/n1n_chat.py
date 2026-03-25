@@ -2,7 +2,9 @@
 import argparse
 import json
 import os
+import socket
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -60,12 +62,37 @@ def load_local_config() -> dict:
     return {}
 
 
-def resolve_credentials() -> tuple[str, str]:
+def pick_api_key(local: dict, model: str) -> str:
+    model_lower = (model or '').strip().lower()
+    env_override = os.environ.get('N1N_API_KEY') or ''
+    if env_override.strip():
+        return env_override.strip()
+
+    candidates = []
+    if model_lower.startswith('gemini'):
+        candidates.extend([local.get('gemini_api_key'), local.get('api_key')])
+    elif model_lower.startswith('claude'):
+        candidates.extend([local.get('claude_api_key'), local.get('api_key')])
+    elif model_lower.startswith('qwen'):
+        candidates.extend([local.get('qwen_api_key'), local.get('api_key')])
+    elif model_lower.startswith('gpt') or model_lower.startswith('openai/gpt'):
+        candidates.extend([local.get('gpt_api_key'), local.get('api_key')])
+    else:
+        candidates.extend([local.get('api_key')])
+
+    candidates.append(os.environ.get('OPENAI_API_KEY'))
+    for value in candidates:
+        if not value:
+            continue
+        value = str(value).strip()
+        if value and value not in PLACEHOLDER_KEYS:
+            return value
+    return ''
+
+
+def resolve_credentials(model: str) -> tuple[str, str]:
     local = load_local_config()
-    api_key = os.environ.get('N1N_API_KEY') or os.environ.get('OPENAI_API_KEY') or local.get('api_key') or ''
-    api_key = api_key.strip()
-    if api_key in PLACEHOLDER_KEYS:
-        api_key = ''
+    api_key = pick_api_key(local, model)
     if not api_key:
         raise RuntimeError('Missing API key. Set N1N_API_KEY or fill config/n1n.local.json.')
 
@@ -87,7 +114,7 @@ def main() -> int:
     parser.add_argument('--out-file')
     args = parser.parse_args()
 
-    api_key, base = resolve_credentials()
+    api_key, base = resolve_credentials(args.model)
     system_text = read_text_arg(args.system, args.system_file).strip()
     user_text = read_text_arg(args.user, args.user_file).strip()
     if not user_text:
@@ -118,15 +145,26 @@ def main() -> int:
         method='POST',
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=args.timeout) as resp:
-            raw = resp.read().decode('utf-8', errors='replace')
-    except urllib.error.HTTPError as exc:
+    raw = None
+    last_exc = None
+    for attempt in range(1, 4):
         try:
-            detail = exc.read().decode('utf-8', errors='replace')
-        except Exception:
-            detail = ''
-        raise RuntimeError(f'HTTP {exc.code} calling {base}/chat/completions :: {detail[:1000]}') from exc
+            with urllib.request.urlopen(req, timeout=args.timeout) as resp:
+                raw = resp.read().decode('utf-8', errors='replace')
+            break
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode('utf-8', errors='replace')
+            except Exception:
+                detail = ''
+            raise RuntimeError(f'HTTP {exc.code} calling {base}/chat/completions :: {detail[:1000]}') from exc
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+            last_exc = exc
+            if attempt >= 3:
+                raise
+            time.sleep(min(2 * attempt, 8))
+    if raw is None:
+        raise RuntimeError(f'No response body received from {base}/chat/completions: {last_exc}')
     payload = json.loads(raw)
     text = extract_text(payload).strip()
 

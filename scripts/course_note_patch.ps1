@@ -67,7 +67,7 @@ $auditText
 "@
 
 Set-Content -Path $promptPath -Value $prompt -Encoding UTF8
-& $pythonBin $modelClient --model $model --user-file $promptPath --out-file $OutPath --temperature 0.1 --max-tokens 6000
+& $pythonBin $modelClient --model $model --user-file $promptPath --out-file $OutPath --temperature 0.1 --max-tokens 6000 --timeout 600
 if ($LASTEXITCODE -ne 0) {
   throw "Patch model failed with exit code: $LASTEXITCODE"
 }

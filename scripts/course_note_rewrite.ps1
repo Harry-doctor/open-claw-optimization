@@ -54,7 +54,7 @@ $sourceText
 "@
 
 Set-Content -Path $promptPath -Value $prompt -Encoding UTF8
-& $pythonBin $modelClient --model $model --user-file $promptPath --out-file $OutPath --temperature 0.2 --max-tokens 5000
+& $pythonBin $modelClient --model $model --user-file $promptPath --out-file $OutPath --temperature 0.2 --max-tokens 5000 --timeout 600
 if ($LASTEXITCODE -ne 0) {
   throw "Rewrite model failed with exit code: $LASTEXITCODE"
 }
