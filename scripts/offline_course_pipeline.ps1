@@ -6,6 +6,9 @@ param(
   [switch]$PlanOnly,
   [int]$FrameInterval = 30,
   [int]$MaxFrames = 20,
+  [ValidateSet('api','local')]
+  [string]$SttBackend = 'local',
+  [string]$LocalWhisperModel = 'medium',
   [string]$Language = 'zh',
   [string]$TranscriptPrompt = '',
   [string]$OcrLang = 'chi_sim+eng',
@@ -27,6 +30,8 @@ $args = @(
   '--out-dir', $OutDir,
   '--frame-interval', $FrameInterval,
   '--max-frames', $MaxFrames,
+  '--stt-backend', $SttBackend,
+  '--local-whisper-model', $LocalWhisperModel,
   '--language', $Language,
   '--ocr-lang', $OcrLang,
   '--ocr-psm', $OcrPsm

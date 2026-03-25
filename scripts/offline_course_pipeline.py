@@ -28,7 +28,13 @@ def slugify(text: str, max_len: int = 80) -> str:
 
 
 def run(cmd, cwd: Path | None = None):
-    result = subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True)
+    result = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        encoding='utf-8',
+        errors='ignore',
+    )
     if result.returncode != 0:
         cmd_text = ' '.join(map(str, cmd))
         raise RuntimeError(f'Command failed ({result.returncode}): {cmd_text}')
@@ -90,6 +96,10 @@ def process_document(document: dict, chapter: dict, out_root: Path, args, script
         cmd += ['--frame-interval', str(args.frame_interval)]
     if args.max_frames is not None:
         cmd += ['--max-frames', str(args.max_frames)]
+    if args.stt_backend:
+        cmd += ['--stt-backend', args.stt_backend]
+    if args.local_whisper_model:
+        cmd += ['--local-whisper-model', args.local_whisper_model]
     if args.language:
         cmd += ['--language', args.language]
     if args.transcript_prompt:
@@ -115,21 +125,38 @@ def process_document(document: dict, chapter: dict, out_root: Path, args, script
     combined_raw = build_combined_raw(doc_title, chapter_label, summary_data)
     write_text(combined_raw_path, combined_raw)
 
-    draft_path = document_dir / 'draft_note.md'
+    structured_path = document_dir / 'structured_outline.md'
+    rewrite_initial_path = document_dir / 'final_note_initial.md'
+    audit_path = document_dir / 'quality_audit.md'
     rewrite_path = document_dir / 'final_note.md'
 
-    draft_script = scripts_dir / 'course_note_draft.ps1'
+    structure_script = scripts_dir / 'course_note_structure.ps1'
     rewrite_script = scripts_dir / 'course_note_rewrite.ps1'
+    audit_script = scripts_dir / 'course_note_audit.ps1'
+    patch_script = scripts_dir / 'course_note_patch.ps1'
+    sanitize_script = scripts_dir / 'sanitize_course_markdown.py'
 
-    run(['powershell', '-ExecutionPolicy', 'Bypass', '-File', str(draft_script), '-SourcePath', str(combined_raw_path), '-OutPath', str(draft_path)])
-    run(['powershell', '-ExecutionPolicy', 'Bypass', '-File', str(rewrite_script), '-SourcePath', str(draft_path), '-OutPath', str(rewrite_path)])
+    run(['powershell', '-ExecutionPolicy', 'Bypass', '-File', str(structure_script), '-SourcePath', str(combined_raw_path), '-OutPath', str(structured_path)])
+    run(['powershell', '-ExecutionPolicy', 'Bypass', '-File', str(rewrite_script), '-SourcePath', str(structured_path), '-OutPath', str(rewrite_initial_path)])
+    run(['powershell', '-ExecutionPolicy', 'Bypass', '-File', str(audit_script), '-SourcePath', str(structured_path), '-FinalPath', str(rewrite_initial_path), '-OutPath', str(audit_path)])
+    if audit_path.exists() and audit_path.stat().st_size > 0:
+        try:
+            run(['powershell', '-ExecutionPolicy', 'Bypass', '-File', str(patch_script), '-SourcePath', str(combined_raw_path), '-NotePath', str(rewrite_initial_path), '-AuditPath', str(audit_path), '-OutPath', str(rewrite_path)])
+        except Exception:
+            write_text(rewrite_path, rewrite_initial_path.read_text(encoding='utf-8', errors='ignore'))
+    else:
+        write_text(rewrite_path, rewrite_initial_path.read_text(encoding='utf-8', errors='ignore'))
+    run([python_bin, str(sanitize_script), str(rewrite_path)])
 
     return {
         **document_meta,
         'document_dir': str(document_dir),
         'raw_batch_dir': str(raw_batch_dir),
         'combined_raw_path': str(combined_raw_path),
-        'draft_note_path': str(draft_path),
+        'structured_outline_path': str(structured_path),
+        'draft_note_path': None,
+        'final_note_initial_path': str(rewrite_initial_path),
+        'quality_audit_path': str(audit_path),
         'final_note_path': str(rewrite_path),
     }
 
@@ -141,6 +168,8 @@ def main():
     parser.add_argument('--plan-only', action='store_true', help='Only build the chapter/document plan without processing videos.')
     parser.add_argument('--frame-interval', type=int, default=30)
     parser.add_argument('--max-frames', type=int, default=20)
+    parser.add_argument('--stt-backend', choices=['api', 'local'], default='local')
+    parser.add_argument('--local-whisper-model', default='medium')
     parser.add_argument('--language', default='zh')
     parser.add_argument('--transcript-prompt', default='')
     parser.add_argument('--ocr-lang', default='chi_sim+eng')
