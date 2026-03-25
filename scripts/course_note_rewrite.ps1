@@ -7,7 +7,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $workspace = 'C:\Users\admin\.openclaw\workspace'
 $configPath = Join-Path $workspace 'config\course_workflow_models.json'
-$modelClient = Join-Path $workspace 'scripts\n1n_chat.ps1'
+$modelClient = Join-Path $workspace 'scripts\n1n_chat.py'
+$pythonBin = Join-Path $env:LocalAppData 'Programs\Python\Python311\python.exe'
+if (-not (Test-Path $pythonBin)) { $pythonBin = 'python.exe' }
 
 if (-not (Test-Path $configPath)) { throw "Missing config: $configPath" }
 if (-not (Test-Path $modelClient)) { throw "Missing model client: $modelClient" }
@@ -25,6 +27,9 @@ New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
 $promptPath = Join-Path $tmpDir 'course_note_rewrite_prompt.txt'
 
 $prompt = @"
+你不是在回复用户，也不是在写总结说明。你是在直接产出最终课程笔记文稿。
+任何“您好 / 根据您提供 / 如果您需要 / 我可以继续帮您”之类的话都禁止出现。
+
 你现在负责把课程笔记初稿，统一重写成最终可读版中文随堂笔记。
 
 目标：
@@ -49,7 +54,7 @@ $sourceText
 "@
 
 Set-Content -Path $promptPath -Value $prompt -Encoding UTF8
-powershell -ExecutionPolicy Bypass -File $modelClient -Model $model -UserFile $promptPath -OutFile $OutPath -Temperature 0.2 -MaxTokens 5000
+& $pythonBin $modelClient --model $model --user-file $promptPath --out-file $OutPath --temperature 0.2 --max-tokens 5000
 if ($LASTEXITCODE -ne 0) {
   throw "Rewrite model failed with exit code: $LASTEXITCODE"
 }
