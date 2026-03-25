@@ -6,6 +6,8 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
 $workspace = 'C:\Users\admin\.openclaw\workspace'
+$referenceHelper = Join-Path $workspace 'scripts\course_note_reference.ps1'
+if (Test-Path $referenceHelper) { . $referenceHelper }
 $configPath = Join-Path $workspace 'config\course_workflow_models.json'
 $modelClient = Join-Path $workspace 'scripts\n1n_chat.py'
 $pythonBin = Join-Path $env:LocalAppData 'Programs\Python\Python311\python.exe'
@@ -22,6 +24,7 @@ if (-not $model) { throw 'Missing structure_model/stage_capture_model in workflo
 
 $sourceText = (Get-Content $SourcePath -Raw -Encoding UTF8).Trim()
 if (-not $sourceText) { throw 'Raw source is empty.' }
+$referenceGuide = if (Get-Command Get-CourseWorkflowReferenceGuide -ErrorAction SilentlyContinue) { Get-CourseWorkflowReferenceGuide -Workspace $workspace -Stage 'structure' } else { '' }
 
 $tmpDir = Join-Path $workspace 'tmp'
 New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
@@ -54,6 +57,9 @@ $prompt = @"
 - 宁可谨慎标记【待核】，也不要把不确定内容写死
 - 宁可结构化整理，也不要写成泛泛总结
 - 这是“结构化知识底稿”，要让后续写作模型一看就能继续扩写成高质量笔记
+
+参考样例规约（只继承组织方法与标签体系，不要照抄内容）：
+$referenceGuide
 
 原始材料：
 $sourceText

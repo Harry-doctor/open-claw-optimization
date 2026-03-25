@@ -8,6 +8,8 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
 $workspace = 'C:\Users\admin\.openclaw\workspace'
+$referenceHelper = Join-Path $workspace 'scripts\course_note_reference.ps1'
+if (Test-Path $referenceHelper) { . $referenceHelper }
 $configPath = Join-Path $workspace 'config\course_workflow_models.json'
 $modelClient = Join-Path $workspace 'scripts\n1n_chat.py'
 $pythonBin = Join-Path $env:LocalAppData 'Programs\Python\Python311\python.exe'
@@ -29,6 +31,7 @@ $auditRaw = if (Test-Path $AuditPath) { Get-Content $AuditPath -Raw -Encoding UT
 $auditText = if ($auditRaw) { $auditRaw.Trim() } else { '' }
 if (-not $sourceText) { throw 'Raw source is empty.' }
 if (-not $noteText) { throw 'Current note is empty.' }
+$referenceGuide = if (Get-Command Get-CourseWorkflowReferenceGuide -ErrorAction SilentlyContinue) { Get-CourseWorkflowReferenceGuide -Workspace $workspace -Stage 'patch' } else { '' }
 if (-not $auditText) {
   Set-Content -Path $OutPath -Value $noteText -Encoding UTF8
   Write-Output $OutPath
@@ -55,6 +58,9 @@ Output ONLY the corrected markdown course note body.
 6. 删除任何客服腔、答复腔、总结腔，例如“您好”“如果你需要”“我可以继续帮您”等。
 7. 不允许在文末额外新增“重点总结 / 主要时间点及机构 / 常考重点提醒 / 重要定义”这类集中汇总板块；重点和易错点必须嵌在对应知识点附近。
 8. 输出 markdown 正文，不要前言，不要解释过程，不要附加说明。
+
+参考样例规约（用于修回长期课程笔记交付形态，不要照抄内容）：
+$referenceGuide
 
 原始材料：
 $sourceText

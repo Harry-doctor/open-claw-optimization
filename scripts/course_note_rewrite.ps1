@@ -6,6 +6,8 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
 $workspace = 'C:\Users\admin\.openclaw\workspace'
+$referenceHelper = Join-Path $workspace 'scripts\course_note_reference.ps1'
+if (Test-Path $referenceHelper) { . $referenceHelper }
 $configPath = Join-Path $workspace 'config\course_workflow_models.json'
 $modelClient = Join-Path $workspace 'scripts\n1n_chat.py'
 $pythonBin = Join-Path $env:LocalAppData 'Programs\Python\Python311\python.exe'
@@ -21,6 +23,7 @@ if (-not $model) { throw 'Missing rewrite_model in workflow config.' }
 
 $sourceText = (Get-Content $SourcePath -Raw -Encoding UTF8).Trim()
 if (-not $sourceText) { throw 'Draft source is empty.' }
+$referenceGuide = if (Get-Command Get-CourseWorkflowReferenceGuide -ErrorAction SilentlyContinue) { Get-CourseWorkflowReferenceGuide -Workspace $workspace -Stage 'rewrite' } else { '' }
 
 $tmpDir = Join-Path $workspace 'tmp'
 New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
@@ -48,6 +51,9 @@ $prompt = @"
 - 层级分明
 - 术语准确
 - 重点和易错点醒目但不杂乱
+
+参考样例规约（用于统一交付风格，不要照抄内容）：
+$referenceGuide
 
 待重写初稿：
 $sourceText

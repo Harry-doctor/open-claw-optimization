@@ -7,6 +7,8 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
 $workspace = 'C:\Users\admin\.openclaw\workspace'
+$referenceHelper = Join-Path $workspace 'scripts\course_note_reference.ps1'
+if (Test-Path $referenceHelper) { . $referenceHelper }
 $configPath = Join-Path $workspace 'config\course_workflow_models.json'
 $n1nConfigPath = Join-Path $workspace 'config\n1n.local.json'
 $modelClient = Join-Path $workspace 'scripts\n1n_chat.py'
@@ -29,6 +31,7 @@ $sourceText = (Get-Content $SourcePath -Raw -Encoding UTF8).Trim()
 $finalText = (Get-Content $FinalPath -Raw -Encoding UTF8).Trim()
 if (-not $sourceText) { throw 'Raw source is empty.' }
 if (-not $finalText) { throw 'Final note is empty.' }
+$referenceGuide = if (Get-Command Get-CourseWorkflowReferenceGuide -ErrorAction SilentlyContinue) { Get-CourseWorkflowReferenceGuide -Workspace $workspace -Stage 'audit' } else { '' }
 
 $tmpDir = Join-Path $workspace 'tmp'
 New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
@@ -75,6 +78,9 @@ $prompt = @"
 
 # 修订动作清单
 - ...
+
+参考样例质检规约：
+$referenceGuide
 
 原始材料：
 $sourceText
