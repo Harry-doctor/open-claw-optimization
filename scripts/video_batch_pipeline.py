@@ -7,8 +7,18 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Iterable, List, Optional
+
+try:
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+    HAS_OPENCV = True
+except Exception:
+    cv2 = None
+    np = None
+    HAS_OPENCV = False
 
 VIDEO_EXTS = {'.mp4', '.mov', '.mkv', '.avi', '.wmv', '.m4v', '.flv', '.webm'}
 BASELINE_FRAME_INTERVAL = 25
@@ -36,12 +46,13 @@ def slugify(text: str, max_len: int = 80) -> str:
     return stem[:max_len]
 
 
-def run(cmd: List[str], *, cwd: Optional[Path] = None, capture: bool = False, check: bool = True):
+def run(cmd: List[str], *, cwd: Optional[Path] = None, capture: bool = False, check: bool = True, env: Optional[dict] = None):
     kwargs = {
         'cwd': str(cwd) if cwd else None,
         'text': True,
         'encoding': 'utf-8',
         'errors': 'ignore',
+        'env': env,
     }
     if capture:
         kwargs['stdout'] = subprocess.PIPE
@@ -321,7 +332,7 @@ def keep_candidate(selected: List[dict], candidate: dict, *, target_dir: Path):
     return kept
 
 
-def extract_frames(video: Path, frames_dir: Path, *, every_seconds: int, max_frames: int, ocr_lang: str, ocr_psm: str):
+def extract_frames_rule_based_ocr(video: Path, frames_dir: Path, *, every_seconds: int, max_frames: int, ocr_lang: str, ocr_psm: str):
     frames_dir.mkdir(parents=True, exist_ok=True)
     for old in frames_dir.glob('frame_*.jpg'):
         old.unlink(missing_ok=True)
@@ -450,11 +461,194 @@ def extract_frames(video: Path, frames_dir: Path, *, every_seconds: int, max_fra
     return [item['output_path'] for item in selected]
 
 
+def _opencv_build_features(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape[:2]
+    scale = min(320 / max(w, 1), 180 / max(h, 1))
+    resized = cv2.resize(gray, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+    blurred = cv2.GaussianBlur(resized, (3, 3), 0)
+    text_mask = cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 11
+    )
+    text_mask = cv2.morphologyEx(
+        text_mask,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        iterations=1,
+    )
+    horiz = cv2.morphologyEx(
+        text_mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (max(12, text_mask.shape[1] // 10), 1)),
+    )
+    vert = cv2.morphologyEx(
+        text_mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(12, text_mask.shape[0] // 8))),
+    )
+    edges = cv2.Canny(blurred, 80, 160)
+    size = max(text_mask.shape[0] * text_mask.shape[1], 1)
+    text_density = cv2.countNonZero(text_mask) / size
+    table_score = (cv2.countNonZero(horiz) + cv2.countNonZero(vert)) / size
+    edge_density = cv2.countNonZero(edges) / size
+    formula_like = edge_density >= 0.08 and 0.04 <= text_density <= 0.32 and table_score < 0.03
+    table_like = table_score >= 0.03
+    return {
+        'gray': blurred,
+        'text_mask': text_mask,
+        'text_density': text_density,
+        'edge_density': edge_density,
+        'table_like': table_like,
+        'formula_like': formula_like,
+    }
+
+
+def save_frame_opencv(frame, output_path: Path):
+    success, encoded = cv2.imencode('.jpg', frame)
+    if not success:
+        raise RuntimeError(f'OpenCV failed to encode frame for {output_path}')
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    encoded.tofile(str(output_path))
+
+
+def extract_frames_opencv(video: Path, frames_dir: Path, *, max_frames: int):
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    for old in frames_dir.glob('frame_*.jpg'):
+        old.unlink(missing_ok=True)
+
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        raise RuntimeError(f'OpenCV could not open video: {video}')
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+    duration = frame_count / fps if fps > 0 and frame_count > 0 else 0
+
+    selected = []
+    prev_features = None
+    last_selected_time = None
+    dense_mode_until = -1.0
+    stable_seconds = 0.0
+    sample_step = 1.0
+    t = 0.0
+
+    while duration <= 0 or t <= duration + 0.01:
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        features = _opencv_build_features(frame)
+        reasons = []
+
+        if prev_features is None:
+            reasons.append('baseline-start')
+        else:
+            image_change = float(np.mean(cv2.absdiff(features['gray'], prev_features['gray'])) / 255.0)
+            text_change = cv2.countNonZero(cv2.absdiff(features['text_mask'], prev_features['text_mask'])) / max(features['text_mask'].size, 1)
+
+            if features['table_like'] or features['formula_like']:
+                dense_mode_until = max(dense_mode_until, t + DENSE_WINDOW_SECONDS)
+
+            if image_change < 0.012 and text_change < 0.02:
+                stable_seconds += sample_step
+            else:
+                stable_seconds = 0.0
+
+            current_gap = DENSE_FRAME_INTERVAL if t <= dense_mode_until else (30 if stable_seconds >= 20 else BASELINE_FRAME_INTERVAL)
+            due_by_gap = last_selected_time is None or (t - last_selected_time) >= current_gap
+            immediate_page = image_change >= 0.14
+            immediate_text = text_change >= 0.18
+
+            if immediate_page and (last_selected_time is None or t - last_selected_time >= SCENE_MIN_GAP_SECONDS):
+                reasons.append('page-change')
+            elif immediate_text and (last_selected_time is None or t - last_selected_time >= SCENE_MIN_GAP_SECONDS):
+                reasons.append('text-region-change')
+            elif due_by_gap:
+                reasons.append('dense-interval' if t <= dense_mode_until else ('stable-relaxed' if current_gap >= 30 else 'baseline'))
+
+            if reasons and features['table_like']:
+                reasons.append('table-detected')
+            if reasons and features['formula_like']:
+                reasons.append('formula-detected')
+
+        if reasons:
+            output_path = frames_dir / f'frame_{len(selected)+1:04d}.jpg'
+            save_frame_opencv(frame, output_path)
+            selected.append({
+                'index': len(selected) + 1,
+                'time_sec': round(t, 3),
+                'file': output_path.name,
+                'reasons': reasons,
+            })
+            last_selected_time = t
+            if max_frames > 0 and len(selected) >= max_frames:
+                break
+
+        prev_features = features
+        t += sample_step
+
+    cap.release()
+
+    if not selected:
+        raise RuntimeError(f'OpenCV adaptive sampler selected no frames for {video.name}')
+
+    selection_meta = {
+        'mode': 'opencv_visual_rules',
+        'baseline_interval_sec': BASELINE_FRAME_INTERVAL,
+        'dense_interval_sec': DENSE_FRAME_INTERVAL,
+        'rules': [
+            'baseline one frame every 25 seconds',
+            'insert immediate frame on large page change',
+            'insert immediate frame when text-region change is large',
+            'temporarily increase to 5-8 seconds when table/formula-like layout appears',
+            'relax back toward 25-30 seconds when content stays stable',
+        ],
+        'selected_frames': selected,
+    }
+    write_text(frames_dir / 'selection-meta.json', json.dumps(selection_meta, ensure_ascii=False, indent=2))
+    return [frames_dir / item['file'] for item in selected]
+
+
+def extract_frames(video: Path, frames_dir: Path, *, every_seconds: int, max_frames: int, ocr_lang: str, ocr_psm: str):
+    if HAS_OPENCV:
+        try:
+            return extract_frames_opencv(video, frames_dir, max_frames=max_frames)
+        except Exception as exc:
+            eprint(f'WARN: OpenCV adaptive sampler failed, falling back to OCR rules: {exc}')
+    return extract_frames_rule_based_ocr(
+        video,
+        frames_dir,
+        every_seconds=every_seconds,
+        max_frames=max_frames,
+        ocr_lang=ocr_lang,
+        ocr_psm=ocr_psm,
+    )
+
+
 def ocr_image(image_path: Path, *, lang: str = 'chi_sim+eng', psm: str = '6') -> str:
     tesseract_bin = ensure_bin('tesseract')
-    cmd = [tesseract_bin, str(image_path), 'stdout', '-l', lang, '--psm', psm]
-    result = run(cmd, capture=True)
-    return (result.stdout or '').strip()
+    env = os.environ.copy()
+    tessdata_dir = Path(tesseract_bin).resolve().parent / 'tessdata'
+    if tessdata_dir.exists() and not env.get('TESSDATA_PREFIX'):
+        env['TESSDATA_PREFIX'] = str(tessdata_dir)
+
+    safe_input = image_path
+    temp_copy = None
+    if any(ord(ch) > 127 for ch in str(image_path)):
+        safe_dir = Path(tempfile.gettempdir()) / 'openclaw_tess'
+        safe_dir.mkdir(parents=True, exist_ok=True)
+        temp_copy = safe_dir / f'ocr_{abs(hash(str(image_path)))}.jpg'
+        shutil.copy2(image_path, temp_copy)
+        safe_input = temp_copy
+
+    try:
+        cmd = [tesseract_bin, str(safe_input), 'stdout', '-l', lang, '--psm', psm]
+        result = run(cmd, capture=True, env=env)
+        return (result.stdout or '').strip()
+    finally:
+        if temp_copy and temp_copy.exists():
+            temp_copy.unlink(missing_ok=True)
 
 
 def dedupe_text_blocks(blocks: List[str]) -> List[str]:
@@ -546,7 +740,7 @@ def process_video(video: Path, out_root: Path, args, index: int, total: int):
         'frame_count': len(frame_paths),
         'ocr_excerpt_count': len(ocr_blocks),
         'raw_material_path': str(raw_md),
-        'frame_selection_mode': 'rule_based_adaptive_no_model',
+        'frame_selection_mode': json.loads((frames_dir / 'selection-meta.json').read_text(encoding='utf-8')).get('mode', 'unknown') if (frames_dir / 'selection-meta.json').exists() else 'unknown',
     }
     meta_json.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
     return meta
