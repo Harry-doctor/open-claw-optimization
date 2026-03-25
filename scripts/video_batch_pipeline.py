@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import difflib
 import json
 import os
 import re
@@ -10,6 +11,13 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 VIDEO_EXTS = {'.mp4', '.mov', '.mkv', '.avi', '.wmv', '.m4v', '.flv', '.webm'}
+BASELINE_FRAME_INTERVAL = 25
+DENSE_FRAME_INTERVAL = 6
+SCENE_CHANGE_THRESHOLD = 0.16
+SCENE_MIN_GAP_SECONDS = 2.5
+DENSE_WINDOW_SECONDS = 18
+OCR_DIFF_THRESHOLD = 0.72
+OCR_NEAR_DUP_THRESHOLD = 0.94
 
 
 def eprint(*args, **kwargs):
@@ -60,6 +68,9 @@ def ensure_bin(name: str) -> str:
         ],
         'ffmpeg': [
             r'C:\ffmpeg\bin\ffmpeg.exe',
+        ],
+        'ffprobe': [
+            r'C:\ffmpeg\bin\ffprobe.exe',
         ],
         'curl': [
             r'C:\Windows\System32\curl.exe',
@@ -141,14 +152,15 @@ def validate_runtime(args):
 
     if not args.skip_ocr:
         ensure_bin('ffmpeg')
+        ensure_bin('ffprobe')
         ensure_bin('tesseract')
 
 
 def extract_audio(video: Path, audio_out: Path):
-    ensure_bin('ffmpeg')
+    ffmpeg_bin = ensure_bin('ffmpeg')
     audio_out.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+        ffmpeg_bin, '-hide_banner', '-loglevel', 'error', '-y',
         '-i', str(video),
         '-vn',
         '-ac', '1',
@@ -160,12 +172,12 @@ def extract_audio(video: Path, audio_out: Path):
 
 
 def transcribe_audio_api(audio_path: Path, transcript_out: Path, *, model: str, language: str = '', prompt: str = ''):
-    ensure_bin('curl')
+    curl_bin = ensure_bin('curl')
     if not os.environ.get('OPENAI_API_KEY'):
         raise RuntimeError('Missing OPENAI_API_KEY for transcription.')
     transcript_out.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        'curl', '-sS', 'https://api.openai.com/v1/audio/transcriptions',
+        curl_bin, '-sS', 'https://api.openai.com/v1/audio/transcriptions',
         '-H', f"Authorization: Bearer {os.environ['OPENAI_API_KEY']}",
         '-H', 'Accept: application/json',
         '-F', f'file=@{audio_path}',
@@ -207,29 +219,235 @@ def transcribe_audio(audio_path: Path, transcript_out: Path, *, backend: str, mo
     transcribe_audio_api(audio_path, transcript_out, model=model, language=language, prompt=prompt)
 
 
-def extract_frames(video: Path, frames_dir: Path, *, every_seconds: int, max_frames: int):
-    ensure_bin('ffmpeg')
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    pattern = frames_dir / 'frame_%04d.jpg'
+def parse_pts_times(stderr_text: str) -> List[float]:
+    times: List[float] = []
+    for line in (stderr_text or '').splitlines():
+        match = re.search(r'pts_time:([0-9\.]+)', line)
+        if match:
+            try:
+                times.append(float(match.group(1)))
+            except ValueError:
+                continue
+    return times
+
+
+def extract_candidates(video: Path, out_dir: Path, *, filter_expr: str, prefix: str) -> List[dict]:
+    ffmpeg_bin = ensure_bin('ffmpeg')
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for old in out_dir.glob(f'{prefix}_*.jpg'):
+        old.unlink(missing_ok=True)
+
+    pattern = out_dir / f'{prefix}_%04d.jpg'
     cmd = [
-        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+        ffmpeg_bin, '-hide_banner', '-loglevel', 'info', '-y',
         '-i', str(video),
-        '-vf', f'fps=1/{every_seconds}',
+        '-vf', f'{filter_expr},showinfo',
         '-q:v', '3',
         str(pattern),
     ]
-    run(cmd)
-    frames = sorted(frames_dir.glob('frame_*.jpg'), key=lambda p: natural_key(p.name))
-    if not frames:
+    result = run(cmd, capture=True)
+    files = sorted(out_dir.glob(f'{prefix}_*.jpg'), key=lambda p: natural_key(p.name))
+    pts_times = parse_pts_times(result.stderr)
+
+    candidates = []
+    for idx, frame_path in enumerate(files):
+        pts_time = pts_times[idx] if idx < len(pts_times) else float(idx)
+        candidates.append({
+            'path': frame_path,
+            'time': round(pts_time, 3),
+            'source': prefix,
+        })
+    return candidates
+
+
+def normalize_ocr_text(text: str) -> str:
+    text = text.replace('\r', '\n')
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip().lower()
+
+
+def text_similarity(a: str, b: str) -> float:
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def looks_like_formula(text: str) -> bool:
+    if not text:
+        return False
+    if re.search(r'[=＋\+\-−×÷/%≤≥≈∑Σπ√∫\^_()]', text):
+        return True
+    if re.search(r'\b[a-zA-Z]\s*=\s*\d', text):
+        return True
+    if re.search(r'\d+\s*/\s*\d+', text):
+        return True
+    return False
+
+
+def looks_like_table(text: str) -> bool:
+    if not text:
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 3:
+        return False
+    if re.search(r'[│┃┆┊|]', text):
+        return True
+    numeric_heavy_lines = 0
+    short_dense_lines = 0
+    for line in lines:
+        token_count = len(re.findall(r'\S+', line))
+        digit_ratio = len(re.findall(r'\d', line)) / max(len(line), 1)
+        if token_count >= 3 and digit_ratio >= 0.12:
+            numeric_heavy_lines += 1
+        if token_count >= 4 and len(line) <= 28:
+            short_dense_lines += 1
+    return numeric_heavy_lines >= 2 or short_dense_lines >= 3
+
+
+def classify_dense_content(text: str) -> bool:
+    return looks_like_table(text) or looks_like_formula(text)
+
+
+def keep_candidate(selected: List[dict], candidate: dict, *, target_dir: Path):
+    output_path = target_dir / f'frame_{len(selected)+1:04d}.jpg'
+    shutil.copy2(candidate['path'], output_path)
+    kept = {
+        **candidate,
+        'output_path': output_path,
+    }
+    selected.append(kept)
+    return kept
+
+
+def extract_frames(video: Path, frames_dir: Path, *, every_seconds: int, max_frames: int, ocr_lang: str, ocr_psm: str):
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    for old in frames_dir.glob('frame_*.jpg'):
+        old.unlink(missing_ok=True)
+
+    baseline_dir = frames_dir / '_baseline'
+    scene_dir = frames_dir / '_scene'
+    dense_dir = frames_dir / '_dense'
+
+    baseline = extract_candidates(video, baseline_dir, filter_expr=f'fps=1/{BASELINE_FRAME_INTERVAL}', prefix='baseline')
+    scene = extract_candidates(video, scene_dir, filter_expr=f"select='gt(scene,{SCENE_CHANGE_THRESHOLD})'", prefix='scene')
+    dense = extract_candidates(video, dense_dir, filter_expr=f'fps=1/{DENSE_FRAME_INTERVAL}', prefix='dense')
+
+    if not baseline:
         raise RuntimeError(
             f'No OCR frames extracted from {video.name}. '
-            f'Check --frame-interval ({every_seconds}) or source video readability.'
+            f'Check the video file or baseline interval ({BASELINE_FRAME_INTERVAL}s).'
         )
-    if max_frames > 0:
-        frames = frames[:max_frames]
-        for extra in sorted(frames_dir.glob('frame_*.jpg'), key=lambda p: natural_key(p.name))[max_frames:]:
-            extra.unlink(missing_ok=True)
-    return frames
+
+    scene_by_time = sorted(scene, key=lambda item: item['time'])
+    dense_by_time = sorted(dense, key=lambda item: item['time'])
+    ocr_cache: dict[str, str] = {}
+
+    def get_norm_text(path: Path) -> str:
+        key = str(path)
+        if key not in ocr_cache:
+            raw = ocr_image(path, lang=ocr_lang, psm=ocr_psm)
+            ocr_cache[key] = normalize_ocr_text(raw)
+        return ocr_cache[key]
+
+    selected: List[dict] = []
+    first = keep_candidate(selected, baseline[0], target_dir=frames_dir)
+    last_text = get_norm_text(first['path'])
+    dense_mode_until = first['time'] + DENSE_WINDOW_SECONDS if classify_dense_content(last_text) else -1.0
+
+    def maybe_keep_scene_candidates(window_start: float, window_end: float):
+        nonlocal last_text, dense_mode_until
+        for cand in scene_by_time:
+            if cand.get('_used'):
+                continue
+            if cand['time'] <= window_start or cand['time'] >= window_end:
+                continue
+            if selected and cand['time'] - selected[-1]['time'] < SCENE_MIN_GAP_SECONDS:
+                continue
+            cand_text = get_norm_text(cand['path'])
+            if text_similarity(last_text, cand_text) <= OCR_DIFF_THRESHOLD:
+                kept = keep_candidate(selected, cand, target_dir=frames_dir)
+                cand['_used'] = True
+                last_text = cand_text
+                if classify_dense_content(cand_text):
+                    dense_mode_until = max(dense_mode_until, kept['time'] + DENSE_WINDOW_SECONDS)
+                if max_frames > 0 and len(selected) >= max_frames:
+                    return True
+        return False
+
+    def maybe_keep_dense_candidates(window_start: float, window_end: float):
+        nonlocal last_text, dense_mode_until
+        if dense_mode_until < 0:
+            return False
+        effective_end = min(window_end, dense_mode_until)
+        for cand in dense_by_time:
+            if cand.get('_used'):
+                continue
+            if cand['time'] <= window_start or cand['time'] >= effective_end:
+                continue
+            if selected and cand['time'] - selected[-1]['time'] < 5:
+                continue
+            cand_text = get_norm_text(cand['path'])
+            similarity = text_similarity(last_text, cand_text)
+            if similarity <= OCR_NEAR_DUP_THRESHOLD or classify_dense_content(cand_text):
+                kept = keep_candidate(selected, cand, target_dir=frames_dir)
+                cand['_used'] = True
+                last_text = cand_text
+                if classify_dense_content(cand_text):
+                    dense_mode_until = max(dense_mode_until, kept['time'] + DENSE_WINDOW_SECONDS)
+                if max_frames > 0 and len(selected) >= max_frames:
+                    return True
+        return False
+
+    for idx in range(1, len(baseline)):
+        prev_time = selected[-1]['time']
+        next_baseline = baseline[idx]
+
+        if maybe_keep_scene_candidates(prev_time, next_baseline['time']):
+            break
+        if maybe_keep_dense_candidates(prev_time, next_baseline['time']):
+            break
+
+        next_text = get_norm_text(next_baseline['path'])
+        kept = keep_candidate(selected, next_baseline, target_dir=frames_dir)
+        last_text = next_text
+        if classify_dense_content(next_text):
+            dense_mode_until = max(dense_mode_until, kept['time'] + DENSE_WINDOW_SECONDS)
+        else:
+            dense_mode_until = max(-1.0, dense_mode_until)
+
+        if max_frames > 0 and len(selected) >= max_frames:
+            break
+
+    if max_frames > 0 and len(selected) > max_frames:
+        selected = selected[:max_frames]
+
+    selection_meta = {
+        'mode': 'rule_based_adaptive_no_model',
+        'baseline_interval_sec': BASELINE_FRAME_INTERVAL,
+        'dense_interval_sec': DENSE_FRAME_INTERVAL,
+        'scene_change_threshold': SCENE_CHANGE_THRESHOLD,
+        'rules': [
+            'baseline one frame every 25 seconds',
+            'insert immediate frame on large page change via ffmpeg scene detection',
+            'insert immediate frame when OCR text changes sharply',
+            'temporarily increase to ~6 seconds per frame when table/formula-like content appears',
+            'return to baseline cadence when content stabilizes',
+        ],
+        'selected_frames': [
+            {
+                'index': idx + 1,
+                'time_sec': item['time'],
+                'source': item['source'],
+                'file': str(item['output_path'].name),
+            }
+            for idx, item in enumerate(selected)
+        ],
+    }
+    write_text(frames_dir / 'selection-meta.json', json.dumps(selection_meta, ensure_ascii=False, indent=2))
+
+    return [item['output_path'] for item in selected]
 
 
 def ocr_image(image_path: Path, *, lang: str = 'chi_sim+eng', psm: str = '6') -> str:
@@ -302,6 +520,8 @@ def process_video(video: Path, out_root: Path, args, index: int, total: int):
             frames_dir,
             every_seconds=args.frame_interval,
             max_frames=args.max_frames,
+            ocr_lang=args.ocr_lang,
+            ocr_psm=args.ocr_psm,
         )
         ocr_dir.mkdir(parents=True, exist_ok=True)
         raw_ocr_blocks = []
@@ -326,13 +546,14 @@ def process_video(video: Path, out_root: Path, args, index: int, total: int):
         'frame_count': len(frame_paths),
         'ocr_excerpt_count': len(ocr_blocks),
         'raw_material_path': str(raw_md),
+        'frame_selection_mode': 'rule_based_adaptive_no_model',
     }
     meta_json.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
     return meta
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Batch process local videos in sequence: extract audio, transcribe, extract frames, OCR, and save raw materials.')
+    parser = argparse.ArgumentParser(description='Batch process local videos in sequence: extract audio, transcribe, adaptively extract frames, OCR, and save raw materials.')
     src = parser.add_mutually_exclusive_group(required=False)
     src.add_argument('--input-dir', help='Directory containing video files.')
     src.add_argument('--manifest', help='JSON array of absolute/relative video paths in desired order.')
@@ -340,7 +561,7 @@ def main():
     parser.add_argument('--recursive', action='store_true', help='Recursively scan --input-dir.')
     parser.add_argument('--order', choices=['name', 'mtime', 'manifest'], default='name', help='Video ordering rule when scanning a directory or files.')
     parser.add_argument('--out-dir', required=True, help='Output directory for batch artifacts.')
-    parser.add_argument('--frame-interval', type=int, default=30, help='Extract one frame every N seconds for OCR (default: 30).')
+    parser.add_argument('--frame-interval', type=int, default=BASELINE_FRAME_INTERVAL, help='Legacy baseline interval knob; adaptive mode still keeps a 25s baseline by default.')
     parser.add_argument('--max-frames', type=int, default=20, help='Maximum frames kept per video (default: 20; 0 means unlimited).')
     parser.add_argument('--stt-backend', choices=['api', 'local'], default=os.environ.get('VIDEO_BATCH_STT_BACKEND', 'api'), help='Speech-to-text backend: api or local (default: env VIDEO_BATCH_STT_BACKEND or api).')
     parser.add_argument('--whisper-model', default='whisper-1', help='OpenAI transcription model when --stt-backend api (default: whisper-1).')
@@ -350,7 +571,7 @@ def main():
     parser.add_argument('--ocr-lang', default='chi_sim+eng', help='Tesseract OCR language pack (default: chi_sim+eng).')
     parser.add_argument('--ocr-psm', default='6', help='Tesseract page segmentation mode (default: 6).')
     parser.add_argument('--skip-transcript', action='store_true', help='Skip audio extraction + transcription.')
-    parser.add_argument('--skip-ocr', action='store_true', help='Skip frame extraction + OCR.')
+    parser.add_argument('--skip-ocr', action='store_true', help='Skip adaptive frame extraction + OCR.')
     args = parser.parse_args()
 
     if not args.input_dir and not args.manifest and not args.files:
