@@ -10,22 +10,26 @@
     "structure": {
       "model": "gemini-3.1-flash-lite-preview",
       "guide_path": "references/course-note-reference/01-structure-guide.md",
-      "feeding_strategy": "只喂结构框架、标签体系、保真/降噪规则与少量代表片段，不喂整篇全文模仿。"
+      "feeding_strategy": "只喂结构框架、标签体系、保真/降噪规则与少量代表片段，不喂整篇全文模仿。",
+      "include_snapshot": false
     },
     "rewrite": {
       "model": "gpt-5.4",
       "guide_path": "references/course-note-reference/02-rewrite-guide.md",
-      "feeding_strategy": "喂风格规约、标签落点、章节组织方式与少量代表片段，让模型统一成稿风格。"
+      "feeding_strategy": "喂风格规约、标签落点、章节组织方式，并直接附带参考文档快照，让模型对齐目标交付形态。",
+      "include_snapshot": true
     },
     "audit": {
       "model": "gemini-3.1-flash-lite-preview",
       "guide_path": "references/course-note-reference/03-audit-guide.md",
-      "feeding_strategy": "只喂质检标准和样例风格要求，不喂整篇参考正文，避免无效 token。"
+      "feeding_strategy": "只喂质检标准和样例风格要求，不喂整篇参考正文，避免无效 token。",
+      "include_snapshot": false
     },
     "patch": {
       "model": "gpt-5.4",
       "guide_path": "references/course-note-reference/04-patch-guide.md",
-      "feeding_strategy": "喂修补标准、禁止项、标签体系与少量代表片段，用于按审计单修补成最终稿。"
+      "feeding_strategy": "喂修补标准、禁止项，并直接附带参考文档快照，用于按审计单把稿件修回目标形态。",
+      "include_snapshot": true
     }
   }
 }

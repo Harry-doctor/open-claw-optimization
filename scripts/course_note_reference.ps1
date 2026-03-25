@@ -28,6 +28,17 @@ function Get-CourseWorkflowReferenceGuide {
   $guideText = (Get-Content $guidePath -Raw -Encoding UTF8).Trim()
   if (-not $guideText) { return '' }
 
+  $snapshotText = ''
+  if ($stageConfig.include_snapshot -and $config.reference_doc -and $config.reference_doc.local_snapshot) {
+    $snapshotPath = [string]$config.reference_doc.local_snapshot
+    if (-not [System.IO.Path]::IsPathRooted($snapshotPath)) {
+      $snapshotPath = Join-Path $Workspace $snapshotPath
+    }
+    if (Test-Path $snapshotPath) {
+      $snapshotText = (Get-Content $snapshotPath -Raw -Encoding UTF8).Trim()
+    }
+  }
+
   $meta = @()
   if ($config.reference_doc) {
     if ($config.reference_doc.title) { $meta += "- 参考样例：$($config.reference_doc.title)" }
@@ -38,5 +49,6 @@ function Get-CourseWorkflowReferenceGuide {
   if ($stageConfig.feeding_strategy) { $meta += "- 喂料策略：$($stageConfig.feeding_strategy)" }
 
   $metaBlock = if ($meta.Count -gt 0) { ($meta -join "`n") + "`n" } else { '' }
-  return ($metaBlock + "`n" + $guideText).Trim()
+  $snapshotBlock = if ($snapshotText) { "`n`n参考文档快照（直接对齐交付形态时使用，不要照抄内容）：`n$snapshotText" } else { '' }
+  return ($metaBlock + "`n" + $guideText + $snapshotBlock).Trim()
 }
