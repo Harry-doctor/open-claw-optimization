@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "msg_type": {"type": "string", "enum": ["task", "result", "status"]},
+    "payload": {"type": "object"},
+    "context_id": {"type": "string"},
+    "timestamp": {"type": "integer"}
+  },
+  "required": ["msg_type", "payload"]
+}

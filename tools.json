@@ -1,0 +1,33 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "dispatch_task",
+      "description": "分发任务给子agent",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "agent_name": {"type": "string"},
+          "task_description": {"type": "string"},
+          "priority": {"type": "integer"}
+        },
+        "required": ["agent_name", "task_description"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "report_to_user",
+      "description": "向用户汇报结果",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "summary": {"type": "string"},
+          "details": {"type": "object"}
+        },
+        "required": ["summary"]
+      }
+    }
+  }
+]
