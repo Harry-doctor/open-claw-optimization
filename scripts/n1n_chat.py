@@ -279,7 +279,7 @@ def main() -> int:
     tools = load_tools(args.tools_file) if args.tool_mode != 'off' else []
     tool_choice = None
     if tools:
-        tool_choice = 'required' if args.tool_mode == 'required' else 'auto'
+        tool_choice = 'required'
 
     api_key, base = resolve_credentials(selected_model)
     api_callable = make_api_callable(api_key, base, args.timeout)
