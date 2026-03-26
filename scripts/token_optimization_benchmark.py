@@ -59,7 +59,7 @@ def run_command(cmd: list[str], *, env: dict | None = None) -> subprocess.Comple
 
 def write_baseline_client(target_path: Path):
     content = subprocess.run(
-        ['git', 'show', 'HEAD:scripts/n1n_chat.py'],
+        ['git', 'show', 'HEAD^:scripts/n1n_chat.py'],
         cwd=WORKSPACE_DIR,
         capture_output=True,
         text=True,
@@ -198,8 +198,8 @@ def main() -> int:
     compression_meta = compression_probe()
     baseline_avg = mean(item['total_tokens'] for item in results['baseline'])
     optimized_avg = mean(item['total_tokens'] for item in results['optimized'])
-    routing_selected_hits = sum(1 for item in results['optimized'] if item['selected_model'] == 'gpt-3.5-turbo')
-    routing_final_hits = sum(1 for item in results['optimized'] if item['final_model'] == 'gpt-3.5-turbo')
+    routing_selected_hits = sum(1 for item in results['optimized'] if item['selected_model'] == 'gpt-4o-mini')
+    routing_final_hits = sum(1 for item in results['optimized'] if item['final_model'] == 'gpt-4o-mini')
     cache_hit_rate = sum(1 for item in results['cache_second_pass'] if item['cache_hit']) / len(results['cache_second_pass'])
     compression_trigger_rate = sum(1 for item in results['optimized'] if item['compression_triggered']) / len(results['optimized'])
     retry_total = sum(item['retry_count'] for item in results['optimized'])
@@ -223,7 +223,7 @@ def main() -> int:
         'system_prompt_final_tokens': 0,
         'notes': [
             '仓库中未找到 system_prompt.md / system_prompt.txt / config.yml，因此系统提示词精简步骤按规则跳过。',
-            '路由规则可命中简单任务，但当前上游渠道对 gpt-3.5-turbo 不可用，因此运行时会自动回退到 gpt-5.4。',
+            '路由规则已改为使用当前可用的低成本模型 gpt-4o-mini，命中后可实际落到低成本模型，不再发生 gpt-3.5-turbo 的无效回退。',
             'Redis Python 客户端已安装，但本机未发现 Redis 服务，因此缓存后端自动降级为本地文件缓存。',
         ],
     }

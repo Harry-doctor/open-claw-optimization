@@ -1,6 +1,6 @@
 rules:
   - condition: "task_type in ['info_extract','format_convert','simple_qa'] and input_tokens < 1000"
-    model: "gpt-3.5-turbo"
+    model: "gpt-4o-mini"
   - condition: "task_type in ['complex_reasoning','code_gen','multi_step_plan'] or input_tokens > 1000"
     model: "gpt-5.4"
 default: "gpt-5.4"

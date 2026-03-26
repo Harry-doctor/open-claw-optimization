@@ -18,7 +18,7 @@ from model_router import route_model
 def test_route_auto_simple_task_to_low_model():
     messages = [{'role': 'user', 'content': '请提取姓名和手机号并输出 json'}]
     model, meta = route_model('auto', messages, task_type='info_extract', routing_path=ROOT / 'model_routing.yaml')
-    assert model == 'gpt-3.5-turbo'
+    assert model == 'gpt-4o-mini'
     assert meta['matched_rule']
 
 
